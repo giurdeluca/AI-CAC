@@ -163,8 +163,8 @@ rand_affine.set_random_state(seed=123)
 
 print('trainable_params: %s\n' % sum(p.numel() for p in model.parameters() if p.requires_grad))
 
+add_negatives_step_counter = 0 
 for epoch in range(start_epoch, num_epochs):
-    add_negatives_step_counter = 0 
     if epoch % INTERVAL_TO_ADD_FALSE_POSITIVE_SLICES == 0:  
         add_negatives_step_counter += 1
         # Reset back to just positive slices after 1st set of FP add back epochs as initial epochs will have lots of False positive non-CAC containing slices after first add back 
