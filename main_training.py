@@ -57,11 +57,10 @@ SAVE_CHECKPOINT_FILE = '/path/'+SAVE_NAME+'.pth'
 comment = f'==== Dynamic Model Training ====\nBatch Size: {BATCH_SIZE}, Learning Rate: {LEARNING_RATE}, Decay: {DECAY_WEIGHT}, Focal alpha: {FOCAL_ALPHA}, Positive Slice upsample factor: {POS_SLICE_UPSAMPLE_FACTOR}, save: {SAVE_CHECKPOINT_FILE}'
 print(comment)
 
-""" SEE IF TRAINING PUBLIC CODE WORKS ON THIS SUBSET OF TRAINING DATA """ 
 sample_df = pd.read_csv('/path/to/sample_of_dicom_paths_and_dcm_tags.csv')
 sample_labels_dir = '/path/to/niftis.nii.gz' # StudyName.nii.gz
 sample_df['StudyName'] = sample_df['study_ID']
-sample_df['DICOMFilePath'] = sample_df['file_path'].str.replace('dbfs:/', '/dbfs/')
+sample_df['DICOMFilePath'] = sample_df['file_path']
 sample_df['AxialPosition'] = sample_df['ImagePositionPatient'].apply(lambda coord: coord.split(', ')[-1].replace(']', '')) # Take Axial position out of [#, #, #]
 sample_df[['StudyName', 'study_ID', 'file_path', 'DICOMFilePath', 'AxialPosition']]
 studies = list(sample_df['StudyName'].unique())
@@ -72,7 +71,6 @@ train_studies = studies[:split_index]
 valid_studies = studies[split_index:]
 train_df = sample_df[sample_df['StudyName'].isin(train_studies)]
 valid_df = sample_df[sample_df['StudyName'].isin(valid_studies)]
-""" END LOAD TRIAL OF PUBLIC TRAIN DATASET """ 
 
 # Training and Validation Dataset should already be filtered to one series per study - the series that has been already manually segmented for CAC
 #train_dicom_dir = '' 
