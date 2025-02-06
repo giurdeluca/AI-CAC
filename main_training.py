@@ -141,10 +141,13 @@ scheduler = StepLR(optimizer, step_size=SCHEDULER_STEP_SIZE, gamma=SCHEDULER_GAM
 
 num_epochs = 2000
 start_epoch = 1 
+add_negatives_step_counter = 0
 
 if LOAD_PRIOR_CHECKPOINT:
-    optimizer.load_state_dict(checkpoint['optimizer_state_dict']) 
     start_epoch = checkpoint['epoch']
+    add_negatives_step_counter = checkpoint['add_negatives_step_counter']
+    optimizer.load_state_dict(checkpoint['optimizer_state_dict']) 
+    scheduler.load_state_dict(checkpoint['scheduler_state_dict'])
 
 dice_metric_sample_avg = torchmetrics.Dice(average='samples', threshold=0, zero_division=1) # average='samples' Average dice per each batch 2D sample instead of computing DICE over full batch 3D
 dice_metric_global = torchmetrics.Dice(threshold=0, zero_division=1) # monai one is calculated per batch item, other is full batch, set dice to 1 if negative seg TP+FP+FN all zero
@@ -163,7 +166,6 @@ rand_affine.set_random_state(seed=123)
 
 print('trainable_params: %s\n' % sum(p.numel() for p in model.parameters() if p.requires_grad))
 
-add_negatives_step_counter = 0 
 for epoch in range(start_epoch, num_epochs):
     if epoch % INTERVAL_TO_ADD_FALSE_POSITIVE_SLICES == 0:  
         add_negatives_step_counter += 1
@@ -247,9 +249,11 @@ for epoch in range(start_epoch, num_epochs):
     
     scheduler.step()
     checkpoint = {
-        'epoch': epoch,
+        'epoch': epoch+1, # start at next epoch when loading, since this one is completed
+        'add_negatives_step_counter': add_negatives_step_counter,
         'model_state_dict': model.state_dict(),
-        'optimizer_state_dict': optimizer.state_dict()
+        'optimizer_state_dict': optimizer.state_dict(),
+        'scheduler_state_dict': scheduler.state_dict()
     }
     if SAVE_CHECKPOINT_DURING_TRAINING:
         torch.save(checkpoint, SAVE_CHECKPOINT_FILE)
