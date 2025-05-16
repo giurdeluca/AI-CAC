@@ -23,7 +23,7 @@ RESAMPLE_SHAPE = (512, 512, 64)
 ZOOM_FACTORS = (1, 1, 1) 
 
 SAVE_MASKS = False # Save PNGs of AI-CAC segmentations
-VISUALIZE_RESULTS = True
+VISUALIZE_RESULTS = False # Display segmentation masks during inference
 
 DICOM_ROOT_DIR = '/path/input_root_dir'
 MODEL_CHECKPOINT_FILE = '/path/va_finetune_nongated_HC2.pth' 
