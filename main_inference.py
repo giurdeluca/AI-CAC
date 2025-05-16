@@ -22,7 +22,7 @@ RESAMPLE_IMAGE_SIZE = (512, 512)
 RESAMPLE_SHAPE = (512, 512, 64) 
 ZOOM_FACTORS = (1, 1, 1) 
 
-SAVE_MASKS = True # Save PNGs of AI-CAC segmentations
+SAVE_MASKS = False # Save PNGs of AI-CAC segmentations
 VISUALIZE_RESULTS = True
 
 DICOM_ROOT_DIR = '/path/input_root_dir'
