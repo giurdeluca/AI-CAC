@@ -147,6 +147,27 @@ def filter_dicom_df(dicom_df):
     dicom_df = dicom_df.astype(str) # allows for grouping in certain columns 
     group_df = dicom_df.groupby(series_specific_columns, as_index = False).size() # Group by these columns to get one row per series in the dataframe 
     group_df = group_df[group_df['size'] > 15] # Only keep series with at least 15 slices
+
+    #debug
+    print(f"group_df shape before filtering: {group_df.shape}")
+    print(f"group_df columns: {group_df.columns.tolist()}")
+    print("Sample rows from group_df:")
+    print(group_df.head())
+    filter_results = []
+    for index, row in group_df.iterrows():
+        result = filter_row(row)
+        filter_results.append(result)
+        if not result:
+            print(f"Row {index} rejected:")
+            print(f"  StudyDescription: {row['StudyDescription']}")
+            print(f"  SeriesDescription: {row['SeriesDescription']}")
+            print(f"  BodyPartExamined: {row['BodyPartExamined']}")
+            print(f"  ContrastBolusAgent: {row['ContrastBolusAgent']}")
+            print(f"  ImageOrientationPatient: {row['ImageOrientationPatient']}")
+            print()
+
+    print(f"Filter results: {sum(filter_results)} passed out of {len(filter_results)} total")
+    #
     filt_df = group_df[[filter_row(row) for index,row in group_df.iterrows()]] # Filter out series with contrast, non-axial slices, non-chest body part
     select_df = filt_df.groupby('StudyName').apply(select_row).reset_index(drop=True) # Select series based on search term priorties calcium terms, cardiac terms, lung, chest etc
     one_series_per_study_df = pd.merge(dicom_df, select_df, on = series_specific_columns) # Expand selected series dataframe to now have rows for each slice (still only one series per study selected)
