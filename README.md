@@ -1,3 +1,24 @@
+# Personal documentation
+
+## Installation
+Clone the repo
+```shell
+git clone https://github.com/Raffi-Hagopian/AI-CAC.git
+```
+
+Create the environment (python version was specified [here](https://github.com/Raffi-Hagopian/AI-CAC/issues/3#issuecomment-2986416848))
+```shell
+conda create -n <env_name> python=3.9.19
+```
+
+Install required packages (pytorch installed separately as it is an old version)
+```shell
+cd AI-CAC
+pip install -r requirements.txt
+pip install torch==1.12.1+cu113 torchvision==0.13.1+cu113 torchaudio==0.12.1 --extra-index-url https://download.pytorch.org/whl/cu113
+```
+
+# Author's documentation
 ## About
 
 AI-CAC is a deep learning model that segments and scores coronary artery calcium (CAC) on routine non-gated, non-contrast chest CT scans. The model has been developed and internally validated in the U.S. Department of Veterans Affairs (VA) and benchmarked against paired gated CAC studies.
