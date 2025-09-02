@@ -16,28 +16,30 @@ from filter_series import *
 from dataset_generator_inference import * 
 from processing import *
 from visualization import *
+from config import load_config
 
-NUM_WORKERS = 12 
-BATCH_SIZE = 16 
-RESAMPLE_IMAGE_SIZE = (512, 512)
-RESAMPLE_SHAPE = (512, 512, 64) 
-ZOOM_FACTORS = (1, 1, 1) 
+config = load_config('config.json')
 
-SAVE_MASKS = False # Save PNGs of AI-CAC segmentations
-VISUALIZE_RESULTS = False # Display segmentation masks during inference
+NUM_WORKERS = config.num_workers 
+BATCH_SIZE = config.batch_size
+RESAMPLE_IMAGE_SIZE = config.resample_image_size
+RESAMPLE_SHAPE = config.resample_shape
+ZOOM_FACTORS = config.zoom_factors
 
-DICOM_ROOT_DIR = '/path/input_root_dir'
-MODEL_CHECKPOINT_FILE = '/path/va_finetune_nongated_HC2.pth' 
+SAVE_MASKS = config.save_masks # Save PNGs of AI-CAC segmentations
+VISUALIZE_RESULTS = config.visualize_results # Display segmentation masks during inference
 
-SCORE_FILE = '/path/scores.csv'
-MASK_FOLDER = '/path/predicted_masks/'
+DICOM_ROOT_DIR = config.dicom_root_dir
+MODEL_CHECKPOINT_FILE = config.model_checkpoint_file
+SCORE_FILE = config.score_file
+MASK_FOLDER = config.mask_folder
 
 score_data = []
 dicom_df = create_dicom_df(DICOM_ROOT_DIR)
 print('DCM DF Created')
 one_series_per_study_df = filter_dicom_df(dicom_df)
 print('DCM DF Filtered')
-one_series_per_study_df.to_csv('/path/dicom_input_one_series.csv', index=False)
+one_series_per_study_df.to_csv(os.path.join(DICOM_ROOT_DIR, 'dicom_input_one_series.csv'), index=False)
 
 study_files = {}
 for index, row in one_series_per_study_df.iterrows():
@@ -110,4 +112,7 @@ with torch.no_grad():
             draw_first_positive(inputs.cpu(), pred_vol.cpu(), pred_vol.cpu(),0)
 
 score_df = pd.DataFrame(score_data)
-score_df.to_csv(SCORE_FILE, index=False)
+study_metadata = one_series_per_study_df.groupby('StudyName').first().reset_index()
+score_df_complete = score_df.merge(study_metadata, how='left', on='StudyName')
+score_df_complete.to_csv(config.score_file, index=False)
+score_df_complete.to_csv(SCORE_FILE, index=False)
