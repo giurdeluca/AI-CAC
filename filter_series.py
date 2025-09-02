@@ -36,13 +36,34 @@ def extract_dicom_attributes(dicom_file):
 # Create Pandas dataframe of StudyName, DICOMFilePath, and DICOM Attributes 
 def create_dicom_df(root_dir):
     data = []
-    for study_name in os.listdir(root_dir):
-        study_path = os.path.join(root_dir, study_name)
-        if os.path.isdir(study_path):
-            for parent_path, _, files in os.walk(study_path):
+    for subject_name in os.listdir(root_dir):
+        subject_path = os.path.join(root_dir, subject_name)
+        if os.path.isdir(subject_path):
+            # Walk through subject directory to find sessions
+            for parent_path, _, files in os.walk(subject_path):
                 for file_name in files:
                     if file_name.lower().endswith('.dcm'):
                         dicom_path = os.path.join(parent_path, file_name)
+                        
+                        # Extract session from the path
+                        # Get relative path from subject folder
+                        rel_path = os.path.relpath(parent_path, subject_path)
+                        path_parts = rel_path.split(os.sep)
+                        
+                        # Find session folder (first part that starts with 'ses-')
+                        session_name = None
+                        for part in path_parts:
+                            if part.startswith('ses-'):
+                                session_name = part
+                                break
+                        
+                        # Create study name as subject_session
+                        if session_name:
+                            study_name = f"{subject_name}_{session_name}"
+                        else:
+                            # Fallback if no session found (shouldn't happen with your structure)
+                            study_name = subject_name
+                        
                         dicom_attr = extract_dicom_attributes(dicom_path)
                         row = {
                             'StudyName': study_name,
@@ -50,6 +71,7 @@ def create_dicom_df(root_dir):
                             **dicom_attr,
                         }
                         data.append(row)
+    
     df = pd.DataFrame(data)
     print(f"Created initial DICOM dataframe with {len(df)} files from {df['StudyName'].nunique()} studies")
     return df
