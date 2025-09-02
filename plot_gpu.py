@@ -1,3 +1,21 @@
+"""
+This script is used to plot GPU usage from nvidia-smi.
+Tutorial:
+Keep 2 terminals open, one to run the script and the other to monitor the GPU.
+
+On the monitor terminal, run:
+```
+nvidia-smi --id=0 --query-gpu=timestamp,utilization.gpu,memory.used --format=csv,nounits -lms 1000 > gpu_usage_report.txt
+```
+Running this command will continuously monitor and update the GPU metrics while the command is active. So stop it manually when you're done.
+It will save a gpu_usage_report.txt in your current working directory.
+
+Then, to plot results,
+```
+python plot_gpu.py /path/to/gpu_usage_report.txt
+```
+"""
+
 import csv
 import datetime
 import matplotlib.pyplot as plt
