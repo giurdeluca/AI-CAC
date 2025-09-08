@@ -18,6 +18,8 @@ from processing import *
 from visualization import *
 from config import load_config
 
+# TO DO: ensure this works if gpu_device is a list!
+
 config = load_config('config.json')
 
 NUM_WORKERS = config.num_workers 
@@ -31,15 +33,22 @@ VISUALIZE_RESULTS = config.visualize_results # Display segmentation masks during
 
 DICOM_ROOT_DIR = config.dicom_root_dir
 MODEL_CHECKPOINT_FILE = config.model_checkpoint_file
-SCORE_FILE = config.score_file
-MASK_FOLDER = config.mask_folder
+#SCORE_FILE = config.score_file
+#FILTERED_FILE = config.filtered_file
+#MASK_FOLDER = config.mask_folder
+GPU_DEVICE = config.gpu_device
+OUTPUT_DIR = config.output_dir
+os.makedirs(OUTPUT_DIR, exist_ok=True)
+SCORE_FILE = os.path.join(OUTPUT_DIR, 'scores.csv')
+FILTERED_FILE = os.path.join(OUTPUT_DIR, 'one_series_per_study_df.csv')
 
 score_data = []
 dicom_df = create_dicom_df(DICOM_ROOT_DIR)
 print('DCM DF Created')
 one_series_per_study_df = filter_dicom_df(dicom_df)
 print('DCM DF Filtered')
-one_series_per_study_df.to_csv(os.path.join(DICOM_ROOT_DIR, 'dicom_input_one_series.csv'), index=False)
+#one_series_per_study_df.to_csv(os.path.join(DICOM_ROOT_DIR, 'dicom_input_one_series.csv'), index=False)
+one_series_per_study_df.to_csv(FILTERED_FILE, index=False)
 
 study_files = {}
 for index, row in one_series_per_study_df.iterrows():
@@ -63,6 +72,9 @@ for study in study_files.keys():
 input_volume_data = CTChestDataset_nongated(study_ids, study_paths, study_labels, new_shape=RESAMPLE_SHAPE, zoom_factors=ZOOM_FACTORS) # transform was unused, took out
 input_loader = DataLoader(input_volume_data, batch_size=1, shuffle=False, num_workers=NUM_WORKERS) #Batch 1 volume at a time for volume loader, will batch slices within volume later 
 
+device = torch.device(f"cuda:{GPU_DEVICE}" if torch.cuda.is_available() else "cpu")
+print(device)
+
 model = SwinUNETR(
     spatial_dims=2,
     img_size=RESAMPLE_IMAGE_SIZE, 
@@ -73,13 +85,12 @@ model = SwinUNETR(
     drop_rate=0.2,
 )
 
-model = nn.DataParallel(model)
+model = nn.DataParallel(model, device_ids=[GPU_DEVICE])
 
-checkpoint = torch.load(MODEL_CHECKPOINT_FILE) 
+checkpoint = torch.load(MODEL_CHECKPOINT_FILE, map_location=device) 
 model.load_state_dict(checkpoint['model_state_dict'])
 
-device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
-print(device)
+
 model.to(device)
 
 i=0
@@ -107,12 +118,11 @@ with torch.no_grad():
         score_data.append(row)
 
         if SAVE_MASKS:
-            save_vol_masks(inputs.cpu().squeeze(), pred_vol.cpu().squeeze(), os.path.join(MASK_FOLDER, study_id))
+            save_vol_masks(inputs.cpu().squeeze(), pred_vol.cpu().squeeze(), os.path.join(OUTPUT_DIR, study_id))
         if VISUALIZE_RESULTS: 
             draw_first_positive(inputs.cpu(), pred_vol.cpu(), pred_vol.cpu(),0)
 
 score_df = pd.DataFrame(score_data)
 study_metadata = one_series_per_study_df.groupby('StudyName').first().reset_index()
 score_df_complete = score_df.merge(study_metadata, how='left', on='StudyName')
-score_df_complete.to_csv(config.score_file, index=False)
 score_df_complete.to_csv(SCORE_FILE, index=False)
