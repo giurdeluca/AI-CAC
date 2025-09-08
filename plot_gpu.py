@@ -12,7 +12,7 @@ It will save a gpu_usage_report.txt in your current working directory.
 
 Then, to plot results,
 ```
-python plot_gpu.py /path/to/gpu_usage_report.txt
+python plot_gpu.py /path/to/gpu_usage_report.txt /path/to/output_file.png
 ```
 """
 
@@ -24,15 +24,15 @@ import os
 
 # Set up argument parser
 parser = argparse.ArgumentParser(description="Parse GPU usage report and plot data.")
-parser.add_argument('filename', type=str, help="Input CSV file containing GPU usage data")
+parser.add_argument('input_filename', type=str, help="Input CSV file containing GPU usage data")
+parser.add_argument('output_filename', type=str, help="Path of the output PNG file")
 args = parser.parse_args()
-base_filename = os.path.splitext(args.filename)[0]
 
 timestamps = []
 utilizations = []
 memory_used = []
 
-with open(args.filename, 'r') as file:
+with open(args.input_filename, 'r') as file:
     reader = csv.reader(file)
     next(reader)  # Skip the header line
     for row in reader:
@@ -72,7 +72,7 @@ ax2.tick_params(axis='y', labelcolor=color)
 fig.tight_layout()
 
 # Save the plot as a PNG file without cutting off
-output_filename = f"{base_filename}_plot.png"
+output_filename = f"{args.output_filename}"
 plt.savefig(output_filename, bbox_inches='tight')
 
 # Show the plot
