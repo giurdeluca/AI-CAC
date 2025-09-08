@@ -73,6 +73,17 @@ EXAMPLE config.json:
 
 The code will select a single non-contrast chest series per study that is most suitable for our CAC model using DICOM metadata. The script internally creates a metadata table across all the suitable imaging series, where each row represents a single DICOM file from a selected series, and has the following columns: `StudyName, DICOMFilePath, AxialPosition`. This table will be used by the inference code to run the model on each slice/DICOM file from the series and aggregate the results into a CAC score.
 
+### Run docker image
+1. Build the docker image
+```shell
+docker build -t aicac .
+```
+
+2. Run image
+```shell
+docker run --gpus all --shm-size=8g -v /local/path/to/input/folder:/app/data -v /local/path/to/output/folder:/app/output -v /home/deluca/test-data/config.json:/app/config.json:ro -v /local/path/to/model_checkpoint:/app/model_checkpoint aicac
+```
+
 ## Citation
 
 Please cite original NEJM AI paper: [doi.org/10.1056/AIoa2400937](https://doi.org/10.1056/AIoa2400937)
