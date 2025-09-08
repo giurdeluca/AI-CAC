@@ -1,4 +1,5 @@
 # Personal documentation
+> Check [README_original](README_original.md) for further documentation and citation!
 
 ## Installation
 Clone the repo
@@ -17,17 +18,6 @@ cd AI-CAC
 pip install -r requirements.txt
 pip install torch==1.12.1+cu113 torchvision==0.13.1+cu113 torchaudio==0.12.1 --extra-index-url https://download.pytorch.org/whl/cu113
 ```
-
-# Author's documentation
-## About
-
-AI-CAC is a deep learning model that segments and scores coronary artery calcium (CAC) on routine non-gated, non-contrast chest CT scans. The model has been developed and internally validated in the U.S. Department of Veterans Affairs (VA) and benchmarked against paired gated CAC studies.
-
-This repository contains:
-
-* Trained model weights
-* Inference code
-* Training code
 
 ## Requirements
 
@@ -73,7 +63,7 @@ EXAMPLE config.json:
 
 The code will select a single non-contrast chest series per study that is most suitable for our CAC model using DICOM metadata. The script internally creates a metadata table across all the suitable imaging series, where each row represents a single DICOM file from a selected series, and has the following columns: `StudyName, DICOMFilePath, AxialPosition`. This table will be used by the inference code to run the model on each slice/DICOM file from the series and aggregate the results into a CAC score.
 
-### Run docker image
+## Run docker image
 1. Build the docker image
 ```shell
 docker build -t aicac .
@@ -83,7 +73,3 @@ docker build -t aicac .
 ```shell
 docker run --gpus all --shm-size=8g -v /local/path/to/input/folder:/app/data -v /local/path/to/output/folder:/app/output -v /home/deluca/test-data/config.json:/app/config.json:ro -v /local/path/to/model_checkpoint:/app/model_checkpoint aicac
 ```
-
-## Citation
-
-Please cite original NEJM AI paper: [doi.org/10.1056/AIoa2400937](https://doi.org/10.1056/AIoa2400937)
