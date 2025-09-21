@@ -1,12 +1,17 @@
-# AI-CAC Project Code
+# AI-CAC Project Code - Optimized Version
 # Creator: Raffi Hagopian MD
 
 import os
 import re
-import ast 
+import ast
+from pathlib import Path
 import pydicom 
 import pandas as pd 
 import matplotlib.pyplot as plt
+from concurrent.futures import ProcessPoolExecutor, as_completed
+from multiprocessing import cpu_count
+from collections import defaultdict
+import time
 
 # Extract selected attributes using pydicom 
 def extract_dicom_attributes(dicom_file):
@@ -32,286 +37,359 @@ def extract_dicom_attributes(dicom_file):
     except Exception as e:
         print(f"Error reading DICOM file {dicom_file}: {e}")
     return attributes 
-  
-# Create Pandas dataframe of StudyName, DICOMFilePath, and DICOM Attributes 
-def create_dicom_df(root_dir):
-    data = []
-    for subject_name in os.listdir(root_dir):
-        subject_path = os.path.join(root_dir, subject_name)
-        if os.path.isdir(subject_path):
-            # Walk through subject directory to find sessions
-            for parent_path, _, files in os.walk(subject_path):
-                for file_name in files:
-                    if file_name.lower().endswith('.dcm'):
-                        dicom_path = os.path.join(parent_path, file_name)
-                        
-                        # Extract session from the path
-                        # Get relative path from subject folder
-                        rel_path = os.path.relpath(parent_path, subject_path)
-                        path_parts = rel_path.split(os.sep)
-                        
-                        # Find session folder (first part that starts with 'ses-')
-                        session_name = None
-                        for part in path_parts:
-                            if part.startswith('ses-'):
-                                session_name = part
-                                break
-                        
-                        # Create study name as subject_session
-                        if session_name:
-                            study_name = f"{subject_name}_{session_name}"
-                        else:
-                            # Fallback if no session found (shouldn't happen with your structure)
-                            study_name = subject_name
-                        
-                        dicom_attr = extract_dicom_attributes(dicom_path)
-                        row = {
-                            'StudyName': study_name,
-                            'DICOMFilePath': dicom_path, 
-                            **dicom_attr,
-                        }
-                        data.append(row)
+def create_series_df_sequential(series_representatives, batch_size=10000):
+    """Sequential processing for very large datasets with memory management"""
+    print("  Using sequential processing with batching...")
     
-    df = pd.DataFrame(data)
-    print(f"Created initial DICOM dataframe with {len(df)} files from {df['StudyName'].nunique()} studies")
+    total = len(series_representatives)
+    all_data = []
+    
+    # Process in batches to manage memory
+    series_items = list(series_representatives.items())
+    
+    for batch_start in range(0, total, batch_size):
+        batch_end = min(batch_start + batch_size, total)
+        batch_items = series_items[batch_start:batch_end]
+        
+        print(f"    Processing batch {batch_start//batch_size + 1}/{(total + batch_size - 1)//batch_size} "
+              f"({batch_start}-{batch_end}/{total})")
+        
+        batch_data = []
+        for i, (series_key, info) in enumerate(batch_items):
+            if i % 1000 == 0 and i > 0:
+                print(f"      Progress: {i}/{len(batch_items)} in current batch")
+            
+            # Read DICOM metadata from representative file only
+            dicom_attr = extract_dicom_attributes(info['representative_file'])
+            
+            row = {
+                'StudyName': info['study_name'],
+                'SeriesKey': series_key,
+                'RepresentativeFile': info['representative_file'],
+                'SeriesFolder': info['series_folder'],
+                'SeriesFolderName': info['series_folder_name'],
+                'SliceCount': info['slice_count'],
+                **dicom_attr
+            }
+            batch_data.append(row)
+        
+        all_data.extend(batch_data)
+        print(f"      Completed batch: {len(batch_data)} series processed")
+    
+    df = pd.DataFrame(all_data)
+    print(f"  Created series DataFrame with {len(df)} rows (one per series)")
     return df
 
+def identify_series_from_paths(root_dir):
+    """Identify unique series without reading DICOM files - much faster!"""
+    print("Step 1: Identifying series from directory structure...")
+    start_time = time.time()
+    
+    series_representatives = {}  # series_key -> info
+    series_file_counts = defaultdict(int)
+    study_series_map = defaultdict(set)  # study -> set of series_keys
+    
+    root_path = Path(root_dir)
+    total_files = 0
+    
+    for dicom_file in root_path.rglob("*.dcm"):
+        total_files += 1
+        if total_files % 50000 == 0:
+            print(f"  Processed {total_files} files...")
+        
+        # Extract study name from path
+        path_parts = dicom_file.parts
+        subject_name = None
+        session_name = None
+        
+        for part in path_parts:
+            if subject_name is None and part.startswith(('sub-', 'subject')):
+                subject_name = part
+            elif part.startswith('ses-'):
+                session_name = part
+                break
+        
+        if subject_name is None:
+            continue
+            
+        study_name = f"{subject_name}_{session_name}" if session_name else subject_name
+        
+        # Create series identifier from path structure
+        # Most DICOM datasets organize files by series in folders
+        series_folder = dicom_file.parent
+        series_key = f"{study_name}||{series_folder.name}||{str(series_folder)}"
+        
+        # Count files per series
+        series_file_counts[series_key] += 1
+        study_series_map[study_name].add(series_key)
+        
+        # Keep first file as representative
+        if series_key not in series_representatives:
+            series_representatives[series_key] = {
+                'study_name': study_name,
+                'representative_file': str(dicom_file),
+                'series_folder': str(series_folder),
+                'series_folder_name': series_folder.name
+            }
+    
+    elapsed = time.time() - start_time
+    print(f"  Found {len(series_representatives)} unique series from {total_files} files")
+    print(f"  Across {len(study_series_map)} studies in {elapsed:.1f} seconds")
+    
+    # Add slice counts to representatives
+    for series_key, info in series_representatives.items():
+        info['slice_count'] = series_file_counts[series_key]
+    
+    return series_representatives, study_series_map
 
-# Filter to keep only one series per study
-# Criteria:
-#  1) At least 15 slices
-#  2) Non-contrast 
-#  3) Axial in Orientation
-#  4) No Study, Series, or Body Part descriptors containing non-chest anatomy words [head, skull, brain, ... etc]
-#  5) Of the remaining series, select the first series in order of the following descriptors [calc, casc, cac, ca]
-#  6) If none of the above words match series/body part descriptors, select the first remaining series in the dataframe
- 
-def filter_dicom_df(dicom_df):
+def create_series_df_parallel(series_representatives, max_workers=4):
+    """Create DataFrame with one row per series using parallel processing"""
+    print(f"Step 2: Reading metadata from {len(series_representatives)} representative files...")
+    
+    def process_series_chunk(series_items):
+        chunk_data = []
+        for series_key, info in series_items:
+            # Read DICOM metadata from representative file only
+            dicom_attr = extract_dicom_attributes(info['representative_file'])
+            
+            row = {
+                'StudyName': info['study_name'],
+                'SeriesKey': series_key,
+                'RepresentativeFile': info['representative_file'],
+                'SeriesFolder': info['series_folder'],
+                'SeriesFolderName': info['series_folder_name'],
+                'SliceCount': info['slice_count'],
+                **dicom_attr
+            }
+            chunk_data.append(row)
+        return chunk_data
+    
+    # Split into chunks for parallel processing
+    series_items = list(series_representatives.items())
+    chunk_size = max(1, len(series_items) // (max_workers * 2))
+    chunks = [series_items[i:i + chunk_size] for i in range(0, len(series_items), chunk_size)]
+    
+    all_data = []
+    with ProcessPoolExecutor(max_workers=max_workers) as executor:
+        future_to_chunk = {executor.submit(process_series_chunk, chunk): chunk for chunk in chunks}
+        
+        for i, future in enumerate(as_completed(future_to_chunk)):
+            chunk_data = future.result()
+            all_data.extend(chunk_data)
+            print(f"  Processed chunk {i+1}/{len(chunks)}")
+    
+    df = pd.DataFrame(all_data)
+    print(f"  Created series DataFrame with {len(df)} rows (one per series)")
+    return df
 
+def filter_series_df(series_df):
+    """Apply filtering at series level - much faster than slice level"""
+    
     def is_axial(orientation_list):
-        if orientation_list == None or orientation_list == 'None':
+        if orientation_list is None or str(orientation_list) in ['None', 'nan', '']:
             return True
         else:
             try:
-                orientation_list = ast.literal_eval(orientation_list)
-                int_list = [int(x) for x in orientation_list]
+                if isinstance(orientation_list, str):
+                    orientation_list = ast.literal_eval(orientation_list)
+                int_list = [int(float(x)) for x in orientation_list]
                 return int_list == [1,0,0,0,1,0] #Axial orientation
             except:
-                print(f"Warning: Could not parse orientation: {orientation_list}")
                 return True  # Default to True if can't parse
     
     def keep_series(study_desc, series_desc, body_part): 
-        if study_desc == 'None' or series_desc == 'None' or study_desc == '' or series_desc == '':
+        if not study_desc or not series_desc or str(study_desc) in ['None', 'nan', ''] or str(series_desc) in ['None', 'nan', '']:
             return False 
-        study_desc = study_desc.lower()
-        series_desc = series_desc.lower()
-        body_part = body_part.lower()
-        filter_terms = ['head', 'brain', 'skull', 'sinus', 'maxillofacial', 'neck', 'spine', 'sternum', 'bone', 'abdomen', 'abd', 'adrenal', 'liver', 'kidney', 'colon', 'pelvis', 'femoral', 'leg', 'extremity', 'abscess', 'needle', 'drain', 'circleofwillis', 'tavr', 'mip', 'arterial', 'venous', 'delay', 'runoff', 'enhanced']
+            
+        study_desc = str(study_desc).lower()
+        series_desc = str(series_desc).lower()
+        body_part = str(body_part).lower()
+        
+        filter_terms = ['head', 'brain', 'skull', 'sinus', 'maxillofacial', 'neck', 'spine', 
+                       'sternum', 'bone', 'abdomen', 'abd', 'adrenal', 'liver', 'kidney', 
+                       'colon', 'pelvis', 'femoral', 'leg', 'extremity', 'abscess', 'needle', 
+                       'drain', 'circleofwillis', 'tavr', 'mip', 'arterial', 'venous', 
+                       'delay', 'runoff', 'enhanced']
         
         for term in filter_terms:
             if term in study_desc or term in series_desc or term in body_part:
                 return False
-        pattern = r'(?i)(?<!\S)A/P(?!\S)' #remove any 'A/P' for abdomen/pelvis if no preceeding or following non-whitespace chacerters 
+                
+        pattern = r'(?i)(?<!\S)A/P(?!\S)'
         if re.search(pattern, series_desc):
             return False
         return True 
     
-    def filter_row(row):
-        study_desc = row['StudyDescription']
-        orient = row['ImageOrientationPatient']
-        series_desc = row['SeriesDescription']
-        body_part = row['BodyPartExamined']
-        contrast = row['ContrastBolusAgent']
+    def select_best_series_per_study(group):
+        """Select the best series for each study"""
+        series_desc = group['SeriesDescription'].astype(str).str.lower()
+        body_part = group['BodyPartExamined'].astype(str).str.lower()
         
-        if contrast != 'None': 
-            print(f"  ❌ Rejected (contrast): Study='{row['StudyName']}', Series='{series_desc}', Contrast='{contrast}'")
-            return False
-        if not is_axial(orient):
-            print(f"  ❌ Rejected (orientation): Study='{row['StudyName']}', Series='{series_desc}', Orientation='{orient}'")
-            return False
-        if not keep_series(study_desc, series_desc, body_part):
-            print(f"  ❌ Rejected (anatomy filter): Study='{row['StudyName']}', Series='{series_desc}', Body='{body_part}'")
-            return False
-        
-        print(f"  ✅ Accepted: Study='{row['StudyName']}', Series='{series_desc}', Slices={row['size']}")
-        return True 
-  
-    def select_row(group):
-        series_desc = group['SeriesDescription'].str.lower() # set to lower case
-        body_part = group['BodyPartExamined'].str.lower()
-        
-        print(f"    Selecting from {len(group)} series for study '{group['StudyName'].iloc[0]}':")
-        for idx, row in group.iterrows():
-            print(f"      - '{row['SeriesDescription']}' ({row['size']} slices)")
-        
-        # Return the first series for this study that satisfies this search
-        # Initially searching over calcium terms, then heart anatomy, then lung, then chest, then if none matched, pick first series left
+        # Priority order for series selection
         if any('calc' in s for s in series_desc):
-            selected = group[series_desc.str.contains('calc')].iloc[0]
-            print(f"    🎯 Selected (calc): '{selected['SeriesDescription']}'")
-            return selected
+            return group[series_desc.str.contains('calc')].iloc[0]
         if any('cacs' in s for s in series_desc):
-            selected = group[series_desc.str.contains('cacs')].iloc[0]
-            print(f"    🎯 Selected (cacs): '{selected['SeriesDescription']}'")
-            return selected
+            return group[series_desc.str.contains('cacs')].iloc[0]
         if any('ca ' in s for s in series_desc):
-            selected = group[series_desc.str.contains('ca ')].iloc[0]
-            print(f"    🎯 Selected (ca): '{selected['SeriesDescription']}'")
-            return selected
+            return group[series_desc.str.contains('ca ')].iloc[0]
         if any('cac' in s for s in series_desc):
-            selected = group[series_desc.str.contains('cac')].iloc[0]
-            print(f"    🎯 Selected (cac): '{selected['SeriesDescription']}'")
-            return selected
+            return group[series_desc.str.contains('cac')].iloc[0]
         if any('calcium' in s for s in body_part):
-            selected = group[body_part.str.contains('calcium')].iloc[0]
-            print(f"    🎯 Selected (calcium body): '{selected['SeriesDescription']}'")
-            return selected
+            return group[body_part.str.contains('calcium')].iloc[0]
         if any('ca ' in s for s in body_part):
-            selected = group[body_part.str.contains('ca ')].iloc[0]
-            print(f"    🎯 Selected (ca body): '{selected['SeriesDescription']}'")
-            return selected
+            return group[body_part.str.contains('ca ')].iloc[0]
         if any('heart' in s for s in body_part):
-            selected = group[body_part.str.contains('heart')].iloc[0]
-            print(f"    🎯 Selected (heart): '{selected['SeriesDescription']}'")
-            return selected
+            return group[body_part.str.contains('heart')].iloc[0]
         if any('card' in s for s in series_desc):
-            selected = group[series_desc.str.contains('card')].iloc[0]
-            print(f"    🎯 Selected (card): '{selected['SeriesDescription']}'")
-            return selected
+            return group[series_desc.str.contains('card')].iloc[0]
         if any('lung' in s for s in series_desc):
-            selected = group[series_desc.str.contains('lung')].iloc[0]
-            print(f"    🎯 Selected (lung): '{selected['SeriesDescription']}'")
-            return selected
+            return group[series_desc.str.contains('lung')].iloc[0]
         if any('chest' in s for s in body_part):
-            selected = group[body_part.str.contains('chest')].iloc[0]
-            print(f"    🎯 Selected (chest): '{selected['SeriesDescription']}'")
-            return selected
+            return group[body_part.str.contains('chest')].iloc[0]
         else:
-            selected = group.iloc[0]
-            print(f"    🎯 Selected (first): '{selected['SeriesDescription']}'")
-            return selected
+            return group.iloc[0]
 
-    # If a series is repeated within a study (similar series specific description, settings tags etc), keep the one that was acquired later in time (more likely higher quality)
-    def keep_latest_series_if_repeated(dicom_df):
-        dicom_df['AcquisitionTime'] = pd.to_numeric(dicom_df['AcquisitionTime'], errors='coerce')
-        dicom_df['AcquisitionTime'] = dicom_df['AcquisitionTime'].fillna(0) # set NA to 0
-        max_time_per_pair = dicom_df.groupby(['StudyName','SeriesInstanceUID'])['AcquisitionTime'].max().reset_index() # Get the latest Study/SeriesID pair timestamp 
-        latest_pairs = max_time_per_pair.loc[max_time_per_pair.groupby('StudyName')['AcquisitionTime'].idxmax()] # For each study, keep the series with the latest timestamp
-        result_df = pd.merge(dicom_df, latest_pairs[['StudyName','SeriesInstanceUID']], on=['StudyName', 'SeriesInstanceUID'])
-        return result_df
-
-    print("="*60)
-    print("STARTING DICOM FILTERING PROCESS")
-    print("="*60)
-
-    series_specific_columns = ['StudyName','StudyDescription','SeriesDescription', 'SliceThickness', 'ImageType', 'ConvolutionKernel', 'ImageOrientationPatient', 'KVP', 'ContrastBolusAgent', 'BodyPartExamined']
-
-    # Step 1: Filter by modality
-    print(f"\nStep 1: Filtering by modality")
-    print(f"  Before: {len(dicom_df)} files")
-    print(f"  Modality distribution: {dicom_df['Modality'].value_counts().to_dict()}")
-    dicom_df = dicom_df[dicom_df['Modality'] == 'CT']
-    print(f"  After CT filter: {len(dicom_df)} files")
-
-    # Step 2: Analyze and filter by slice thickness
-    print(f"\nStep 2: Analyzing slice thickness")
-    dicom_df['SliceThickness'] = pd.to_numeric(dicom_df['SliceThickness'], errors='coerce')
+    print("Step 3: Filtering series...")
+    original_count = len(series_df)
     
-    # Log slice thickness distribution
-    print("  Slice thickness analysis:")
-    thickness_counts = dicom_df['SliceThickness'].value_counts(dropna=False).sort_index()
-    for thickness, count in thickness_counts.items():
-        print(f"    {thickness}mm: {count} files")
+    # Apply all filters
+    print(f"  Starting with {original_count} series")
     
-    print(f"  Slice thickness statistics:")
-    print(f"    Min: {dicom_df['SliceThickness'].min()}")
-    print(f"    Max: {dicom_df['SliceThickness'].max()}")
-    print(f"    Mean: {dicom_df['SliceThickness'].mean():.2f}")
-    print(f"    Null values: {dicom_df['SliceThickness'].isna().sum()}")
+    # Filter 1: Modality
+    series_df = series_df[series_df['Modality'] == 'CT']
+    print(f"  After CT filter: {len(series_df)} series")
     
-    # Apply slice thickness filter
-    before_thickness = len(dicom_df)
-    thickness_mask = (dicom_df['SliceThickness'] >= 2.5) & (dicom_df['SliceThickness'] <= 5.0)
-    dicom_df = dicom_df[thickness_mask]
-    print(f"  After thickness filter (2.5-5.0mm): {len(dicom_df)} files")
-    print(f"  Removed {before_thickness - len(dicom_df)} files due to slice thickness")
+    # Filter 2: Slice thickness
+    series_df['SliceThickness'] = pd.to_numeric(series_df['SliceThickness'], errors='coerce')
+    thickness_mask = (series_df['SliceThickness'] >= 2.5) & (series_df['SliceThickness'] <= 5.0)
+    series_df = series_df[thickness_mask]
+    print(f"  After thickness filter (2.5-5.0mm): {len(series_df)} series")
     
-    if dicom_df.shape[0] == 0:
-        print('❌ CRITICAL: No images satisfy the slice thickness requirement')
-        print('   Consider adjusting the slice thickness range or check your DICOM files')
-        return pd.DataFrame()  # Return empty dataframe
+    # Filter 3: Minimum slice count
+    series_df = series_df[series_df['SliceCount'] > 15]
+    print(f"  After slice count filter (>15): {len(series_df)} series")
     
-    # Step 3: Group by series
-    print(f"\nStep 3: Grouping by series")
-    dicom_df.fillna('None', inplace=True) # Replace NA with string 'None'
-    dicom_df = dicom_df.astype(str) # allows for grouping in certain columns 
-    group_df = dicom_df.groupby(series_specific_columns, as_index=False).size() # Group by these columns to get one row per series in the dataframe 
-    print(f"  Found {len(group_df)} unique series across {group_df['StudyName'].nunique()} studies")
+    # Filter 4: Contrast
+    contrast_mask = (series_df['ContrastBolusAgent'].isna()) | (series_df['ContrastBolusAgent'].astype(str) == 'None')
+    series_df = series_df[contrast_mask]
+    print(f"  After contrast filter: {len(series_df)} series")
     
-    # Log series info
-    for study in group_df['StudyName'].unique():
-        study_series = group_df[group_df['StudyName'] == study]
-        print(f"    Study '{study}': {len(study_series)} series")
-        for _, row in study_series.iterrows():
-            print(f"      - '{row['SeriesDescription']}' ({row['size']} slices)")
-
-    # Step 4: Filter by minimum slice count
-    print(f"\nStep 4: Filtering by minimum slice count (>15)")
-    before_slice_count = len(group_df)
-    group_df = group_df[group_df['size'] > 15] # Only keep series with at least 15 slices
-    print(f"  Before: {before_slice_count} series")
-    print(f"  After: {len(group_df)} series")
-    print(f"  Removed {before_slice_count - len(group_df)} series with ≤15 slices")
-
-    if len(group_df) == 0:
-        print('❌ CRITICAL: No series have more than 15 slices')
+    # Filter 5: Orientation
+    orientation_mask = series_df['ImageOrientationPatient'].apply(is_axial)
+    series_df = series_df[orientation_mask]
+    print(f"  After orientation filter: {len(series_df)} series")
+    
+    # Filter 6: Anatomy terms
+    anatomy_mask = series_df.apply(lambda row: keep_series(
+        row['StudyDescription'], 
+        row['SeriesDescription'], 
+        row['BodyPartExamined']
+    ), axis=1)
+    series_df = series_df[anatomy_mask]
+    print(f"  After anatomy filter: {len(series_df)} series")
+    
+    if len(series_df) == 0:
+        print("  WARNING: No series passed all filters!")
         return pd.DataFrame()
+    
+    # Filter 7: Select best series per study
+    print("  Selecting best series per study...")
+    selected_series = series_df.groupby('StudyName').apply(select_best_series_per_study).reset_index(drop=True)
+    print(f"  Final selection: {len(selected_series)} series (one per study)")
+    
+    return selected_series
 
-    # Step 5: Apply quality filters (contrast, orientation, anatomy)
-    print(f"\nStep 5: Applying quality filters (contrast, orientation, anatomy)")
-    print("  Testing each series:")
+def expand_to_slice_level(selected_series):
+    """Expand selected series back to individual slice level"""
+    print("Step 4: Expanding selected series to slice level...")
     
-    filter_results = []
-    for index, row in group_df.iterrows():
-        result = filter_row(row)
-        filter_results.append(result)
+    all_slice_data = []
     
-    filt_df = group_df[filter_results]
-    print(f"  Results: {len(filt_df)} series passed out of {len(group_df)} total")
+    for _, series_row in selected_series.iterrows():
+        study_name = series_row['StudyName']
+        series_folder = Path(series_row['SeriesFolder'])
+        
+        print(f"  Processing series: {study_name} - {series_row['SeriesDescription']}")
+        
+        # Get all DICOM files in this series folder
+        dicom_files = list(series_folder.glob("*.dcm"))
+        
+        for dicom_file in dicom_files:
+            try:
+                # Read only the ImagePositionPatient for axial position
+                ds = pydicom.dcmread(dicom_file, stop_before_pixels=True,
+                                   specific_tags=['ImagePositionPatient'])
+                position = getattr(ds, 'ImagePositionPatient', [0,0,0])
+                axial_pos = float(position[2]) if len(position) > 2 else 0.0
+            except:
+                axial_pos = 0.0
+            
+            # Create row with series metadata + slice-specific info
+            slice_row = {
+                'StudyName': study_name,
+                'DICOMFilePath': str(dicom_file),
+                'AxialPosition': axial_pos,
+                # Copy all series-level metadata
+                'SeriesDescription': series_row['SeriesDescription'],
+                'StudyDescription': series_row['StudyDescription'],
+                'Modality': series_row['Modality'],
+                'SliceThickness': series_row['SliceThickness'],
+                'KVP': series_row['KVP'],
+                'ConvolutionKernel': series_row['ConvolutionKernel'],
+                'ImageOrientationPatient': series_row['ImageOrientationPatient'],
+                'ImageType': series_row['ImageType'],
+                'ContrastBolusAgent': series_row['ContrastBolusAgent'],
+                'BodyPartExamined': series_row['BodyPartExamined'],
+                'AcquisitionTime': series_row['AcquisitionTime'],
+                'SeriesInstanceUID': series_row['SeriesInstanceUID'],
+                'ImagePositionPatient': str([0, 0, axial_pos]),  # Simplified
+            }
+            all_slice_data.append(slice_row)
     
-    if len(filt_df) == 0:
-        print('❌ CRITICAL: No series passed the quality filters')
-        print('   Consider adjusting filter criteria for your dataset')
+    final_df = pd.DataFrame(all_slice_data)
+    print(f"  Expanded to {len(final_df)} slices from {final_df['StudyName'].nunique()} studies")
+    
+    return final_df
+
+def optimized_dicom_processing(root_dir, max_workers=4, force_sequential=False):
+    """Complete optimized workflow - series-level processing first"""
+    print("="*60)
+    print("OPTIMIZED DICOM PROCESSING")
+    print("="*60)
+    
+    start_time = time.time()
+    
+    # Step 1: Identify series from paths (fast)
+    series_representatives, study_series_map = identify_series_from_paths(root_dir)
+    
+    # Step 2: Create series-level DataFrame (small, manageable)
+    if force_sequential or len(series_representatives) > 50000:
+        series_df = create_series_df_sequential(series_representatives)
+    else:
+        try:
+            series_df = create_series_df_parallel(series_representatives, max_workers)
+        except Exception as e:
+            print(f"Parallel processing failed: {e}")
+            print("Falling back to sequential processing...")
+            series_df = create_series_df_sequential(series_representatives)
+    
+    # Step 3: Filter at series level (fast)
+    selected_series = filter_series_df(series_df)
+    
+    if len(selected_series) == 0:
+        print("No series passed filtering criteria!")
         return pd.DataFrame()
-
-    # Step 6: Select best series per study
-    print(f"\nStep 6: Selecting best series per study")
-    select_df = filt_df.groupby('StudyName').apply(select_row).reset_index(drop=True)
-    print(f"  Final selection: {len(select_df)} series (one per study)")
-
-    # Step 7: Expand back to slice level
-    print(f"\nStep 7: Expanding back to slice level")
-    one_series_per_study_df = pd.merge(dicom_df, select_df, on=series_specific_columns)
-    print(f"  Expanded to {len(one_series_per_study_df)} individual slices")
-
-    # Step 8: Handle repeated series
-    print(f"\nStep 8: Handling repeated series (keeping latest)")
-    one_series_per_study_df = keep_latest_series_if_repeated(one_series_per_study_df)
-    print(f"  Final result: {len(one_series_per_study_df)} slices from {one_series_per_study_df['StudyName'].nunique()} studies")
-
-    # Step 9: Add axial position
-    print(f"\nStep 9: Adding axial position information")
-    one_series_per_study_df['AxialPosition'] = one_series_per_study_df['ImagePositionPatient'].apply(lambda coord: coord.split(', ')[-1].replace(']', ''))
-    one_series_per_study_df = one_series_per_study_df.astype(str)
-
+    
+    # Step 4: Expand only selected series to slice level
+    final_df = expand_to_slice_level(selected_series)
+    
+    # Step 5: Final cleanup
+    final_df = final_df.astype(str)  # Convert to string as in original
+    
+    total_time = time.time() - start_time
     print("="*60)
-    print("FILTERING COMPLETE")
+    print(f"PROCESSING COMPLETE in {total_time/60:.1f} minutes")
+    print(f"Final result: {len(final_df)} slices from {final_df['StudyName'].nunique()} studies")
     print("="*60)
     
-    # Final summary
-    for study in one_series_per_study_df['StudyName'].unique():
-        study_data = one_series_per_study_df[one_series_per_study_df['StudyName'] == study]
-        series_desc = study_data['SeriesDescription'].iloc[0]
-        print(f"✅ Study '{study}': {len(study_data)} slices from series '{series_desc}'")
-
-    return one_series_per_study_df
+    return final_df

@@ -2,6 +2,7 @@
 # Creator: Raffi Hagopian MD
 
 import os
+import csv
 import random
 import pydicom
 import pandas as pd
@@ -42,13 +43,37 @@ os.makedirs(OUTPUT_DIR, exist_ok=True)
 SCORE_FILE = os.path.join(OUTPUT_DIR, 'scores.csv')
 FILTERED_FILE = os.path.join(OUTPUT_DIR, 'one_series_per_study_df.csv')
 
-score_data = []
-dicom_df = create_dicom_df(DICOM_ROOT_DIR)
-print('DCM DF Created')
-one_series_per_study_df = filter_dicom_df(dicom_df)
-print('DCM DF Filtered')
-#one_series_per_study_df.to_csv(os.path.join(DICOM_ROOT_DIR, 'dicom_input_one_series.csv'), index=False)
-one_series_per_study_df.to_csv(FILTERED_FILE, index=False)
+#dicom_df = create_series_df_parallel(DICOM_ROOT_DIR)
+#print('DCM DF Created')
+
+# Check if processed file already exists
+
+if os.path.exists(FILTERED_FILE):
+    # Load existing file
+    one_series_per_study_df = pd.read_csv(FILTERED_FILE)
+    print('Loaded existing one_series file')
+else:
+    # Create new file
+    print('Creating new one_series file')
+    one_series_per_study_df = optimized_dicom_processing(DICOM_ROOT_DIR, max_workers=4, force_sequential=True)
+    one_series_per_study_df.to_csv(FILTERED_FILE, index=False)
+    print('DCM DF Filtered')
+
+
+# Check what's already been processed
+processed_studies = set()
+if os.path.exists(SCORE_FILE):
+    existing_df = pd.read_csv(SCORE_FILE)
+    processed_studies = set(existing_df['StudyName'].tolist())
+    file_mode = 'a'  # append mode
+    write_header = False
+else:
+    file_mode = 'w'  # write mode
+    write_header = True
+# Filter out already processed studies
+one_series_per_study_df = one_series_per_study_df[~one_series_per_study_df['StudyName'].isin(processed_studies)]
+one_series_per_study_df = one_series_per_study_df.reset_index(drop=True)
+print(f"Number of studies to process: {len(one_series_per_study_df)}")
 
 study_files = {}
 for index, row in one_series_per_study_df.iterrows():
@@ -93,36 +118,65 @@ model.load_state_dict(checkpoint['model_state_dict'])
 
 model.to(device)
 
-i=0
-model.eval()
-with torch.no_grad():
-    for study_id, inputs, targets, hu_vols, vox_dims in input_loader:
-        i += 1
-        study_id = study_id[0] # size one batch, first id is only id
-        inputs = inputs.to(device)
-        pred_vol = torch.zeros(inputs.shape, dtype=torch.float, device=device)
-        num_slices = inputs.shape[4]
-
-        for start_idx in range(0, num_slices, BATCH_SIZE):
-            end_idx = min(start_idx + BATCH_SIZE, num_slices)
-            batch = inputs[..., start_idx:end_idx]
-            batch = batch.squeeze(0).permute(3,0,1,2)
-            batch_out = model(batch.float()) #might need to move batch dimension
-            batch_out = batch_out.unsqueeze(0).permute(0,2,3,4,1)
-            pred_vol[..., start_idx:end_idx] = batch_out
-
-        pred_cacs = compute_agatston_for_batch(inputs.cpu(), pred_vol.cpu(), vox_dims)
-        
-        print(i, study_id, pred_cacs[0]) 
-        row = {'StudyName': study_id, 'AI-CAC': pred_cacs[0]}
-        score_data.append(row)
-
-        if SAVE_MASKS:
-            save_vol_masks(inputs.cpu().squeeze(), pred_vol.cpu().squeeze(), os.path.join(OUTPUT_DIR, study_id))
-        if VISUALIZE_RESULTS: 
-            draw_first_positive(inputs.cpu(), pred_vol.cpu(), pred_vol.cpu(),0)
-
-score_df = pd.DataFrame(score_data)
+# Prepare metadata for efficient merging
 study_metadata = one_series_per_study_df.groupby('StudyName').first().reset_index()
-score_df_complete = score_df.merge(study_metadata, how='left', on='StudyName')
-score_df_complete.to_csv(SCORE_FILE, index=False)
+metadata_dict = study_metadata.set_index('StudyName').to_dict('index')
+
+# Define final column structure (StudyName, AI-CAC, then all metadata columns)
+final_columns = ['StudyName', 'AI-CAC'] + [col for col in study_metadata.columns if col != 'StudyName']
+
+# Initialize CSV file with headers
+# Conditional header writing
+if write_header:
+    with open(SCORE_FILE, 'w', newline='') as csvfile:
+        writer = csv.DictWriter(csvfile, fieldnames=final_columns)
+        writer.writeheader()
+
+with open(SCORE_FILE, 'a', newline='') as csvfile: # Always append from here
+  writer = csv.DictWriter(csvfile, fieldnames=final_columns)
+  i=0
+  model.eval()
+  with torch.no_grad():
+      for study_id, inputs, targets, hu_vols, vox_dims in input_loader:
+        i += 1
+        try:
+          assert inputs.shape[4] > 0, "No slices in volume"
+          study_id = study_id[0] # size one batch, first id is only id
+          inputs = inputs.to(device)
+          pred_vol = torch.zeros(inputs.shape, dtype=torch.float, device=device)
+          num_slices = inputs.shape[4]
+
+          for start_idx in range(0, num_slices, BATCH_SIZE):
+              end_idx = min(start_idx + BATCH_SIZE, num_slices)
+              batch = inputs[..., start_idx:end_idx]
+              batch = batch.squeeze(0).permute(3,0,1,2)
+              batch_out = model(batch.float()) #might need to move batch dimension
+              batch_out = batch_out.unsqueeze(0).permute(0,2,3,4,1)
+              pred_vol[..., start_idx:end_idx] = batch_out
+
+          pred_cacs = compute_agatston_for_batch(inputs.cpu(), pred_vol.cpu(), vox_dims)
+          
+          print(i, study_id, pred_cacs[0]) 
+          # Create row with AI-CAC result
+          row = {'StudyName': study_id, 'AI-CAC': pred_cacs[0]}
+          # Merge with metadata
+          if study_id in metadata_dict:
+              row.update(metadata_dict[study_id])
+          # Write immediately
+          writer.writerow(row)
+
+          if SAVE_MASKS:
+              save_vol_masks(inputs.cpu().squeeze(), pred_vol.cpu().squeeze(), os.path.join(OUTPUT_DIR, study_id))
+          if VISUALIZE_RESULTS: 
+              draw_first_positive(inputs.cpu(), pred_vol.cpu(), pred_vol.cpu(),0)
+
+        except (IndexError, AssertionError, RuntimeError) as e:
+            # Handle expected processing errors
+            error_msg = f"Processing failed for {study_id}: {str(e)}"
+            print(error_msg)
+            # Write failure row and continue
+        except Exception as e:
+            # Log unexpected errors but continue
+            error_msg = f"Unexpected error for {study_id}: {str(e)}"
+            print(error_msg)
+            # Could also write to separate error log
